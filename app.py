@@ -3,26 +3,44 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
+import requests
 
 # 1. 网页配置
-st.set_page_config(page_title="实时定投模拟器", layout="wide")
-st.title("🏹 实时联动：BTC/Altcoin 定投分析")
+st.set_page_config(page_title="CMC 实时定投工具", layout="wide")
+st.title("💎 CMC 实时联动：定投精准分析 (对齐版)")
 
-# 2. 侧边栏
+# 2. 自动获取 API Key (优先从 Secrets 读取)
+if "CMC_API_KEY" in st.secrets:
+    cmc_api_key = st.secrets["CMC_API_KEY"]
+else:
+    with st.sidebar:
+        st.warning("🔑 未在后台检测到 Key，请在此手动输入：")
+        cmc_api_key = st.text_input("CMC API Key", type="password")
+
+# 侧边栏设置
 with st.sidebar:
     st.header("⚙️ 策略设置")
-    coin = st.selectbox("选择币种", ["BTC", "ETH", "BNB", "SOL", "NVDA"])
-    symbol = f"{coin}-USD" if coin != "NVDA" else coin
-    start_date = st.date_input("开始日期", value=datetime(2020, 1, 1))
-    amount = st.number_input("定投金额 ($)", min_value=1, value=100)
-    frequency = st.selectbox("频率", ["每天", "每周", "每月初"], index=1)
+    coin = st.selectbox("选择币种", ["BTC", "ETH", "BNB", "SOL", "XRP"])
+    start_date = st.date_input("开始定投日期", value=datetime(2020, 1, 1))
+    amount = st.number_input("每期定投金额 ($)", min_value=1, value=100)
+    frequency = st.selectbox("定投频率", ["每天", "每周", "每月初"], index=2)
     freq_map = {"每天": "D", "每周": "W", "每月初": "MS"}
 
-@st.cache_data(ttl=300) # 缓存缩短至5分钟，确保价格足够新
-def get_realtime_data(symbol, start):
+# --- 函数：CMC 实时报价 ---
+def get_cmc_price(symbol, api_key):
+    if not api_key: return None
+    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+    headers = {'Accepts': 'application/json', 'X-CMC_PRO_API_KEY': api_key}
+    try:
+        response = requests.get(url, headers=headers, params={'symbol': symbol, 'convert': 'USD'})
+        return response.json()['data'][symbol]['quote']['USD']['price']
+    except: return None
+
+# --- 函数：历史数据抓取 ---
+@st.cache_data(ttl=600)
+def get_hist_data(coin_sym, start):
+    symbol = f"{coin_sym}-USD"
     df = yf.download(symbol, start=start, progress=False)
-    if df.empty: return None
-    # 兼容处理多级索引
     if isinstance(df.columns, pd.MultiIndex):
         temp = df['Close'].iloc[:, 0]
     else:
@@ -30,50 +48,55 @@ def get_realtime_data(symbol, start):
     return temp.to_frame(name='Close').dropna()
 
 try:
-    data = get_realtime_data(symbol, start_date)
+    hist_raw = get_hist_data(coin, start_date)
     
-    if data is not None:
-        # --- 核心改进：实时价格追加逻辑 ---
-        # A. 提取历史周期点数据
-        dca = data['Close'].resample(freq_map[frequency]).first().to_frame()
+    if hist_raw is not None:
+        # --- 核心逻辑：精准对齐 ---
+        # 1. 提取历史周期点 (例如每个月1号)
+        dca = hist_raw['Close'].resample(freq_map[frequency]).first().to_frame()
         
-        # B. 获取此时此刻的最新价格
-        latest_price = data['Close'].iloc[-1]
-        latest_date = data.index[-1]
+        # 2. 关键：只保留“已发生”的扣款，不含今天这个未完成周期
+        # 比如今天是21号，选“每月初”，则本月1号算一笔，但本月本金不再增加
+        now = datetime.now()
+        dca = dca[dca.index < now]
         
-        # C. 检查最后一笔是否是“今天”的实时价
-        # 如果历史周期点里不包含今天，就强行把今天这一笔加上去
-        if latest_date not in dca.index:
-            last_row = pd.DataFrame({'Close': [latest_price]}, index=[latest_date])
-            dca = pd.concat([dca, last_row])
-        
-        dca = dca.sort_index().dropna()
+        # 3. 获取 CMC 实时价
+        realtime_p = get_cmc_price(coin, cmc_api_key)
+        if realtime_p is None:
+            realtime_p = hist_raw['Close'].iloc[-1]
+            st.caption("⚠️ 正在使用雅虎备用实时数据")
+        else:
+            st.success(f"✅ 已通过 CMC 获取实时报价: ${realtime_p:,.2f}")
 
-        # 核心计算
-        dca['Cost'] = [amount * (i + 1) for i in range(len(dca))]
-        dca['Qty'] = amount / dca['Close']
-        dca['Total_Qty'] = dca['Qty'].cumsum()
-        dca['Value'] = dca['Total_Qty'] * dca['Close']
+        # 4. 核心指标计算
+        total_invested = len(dca) * amount
+        total_qty = (amount / dca['Close']).sum()
+        my_avg_price = total_invested / total_qty
         
-        # 数据看板
-        f_cost = dca['Cost'].iloc[-1]
-        f_val = dca['Value'].iloc[-1]
-        avg_p = f_cost / dca['Total_Qty'].iloc[-1]
-        curr_p = latest_price # 强制显示最新的实时价
-        roi = (f_val - f_cost) / f_cost * 100
+        # 实时表现
+        current_market_val = total_qty * realtime_p
+        total_roi = (current_market_val - total_invested) / total_invested * 100
+        # 精准差价：实时价相对于均价的百分比
+        price_diff_pct = (realtime_p - my_avg_price) / my_avg_price * 100
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("累计投入", f"${f_cost:,.0f}")
-        c2.metric("持仓均价", f"${avg_p:,.2f}")
-        c3.metric("当前总市值", f"${f_val:,.0f}", f"{roi:.2f}%")
-        c4.metric("最新实时价", f"${curr_p:,.2f}")
+        # 5. UI 指标卡片
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("累计投入本金", f"${total_invested:,.0f}")
+        col2.metric("我的持仓均价", f"${my_avg_price:,.2f}")
+        
+        # 第三格：实时对比（如果实时价低于均价，delta 会变红/变绿提示补仓）
+        col3.metric("实时价 vs 均价", f"{price_diff_pct:+.2f}%", 
+                    delta=f"{'折价' if price_diff_pct < 0 else '溢价'}", 
+                    delta_color="inverse")
+        
+        col4.metric("实时账户市值", f"${current_market_value:,.0f}", f"{total_roi:.2f}%")
 
-        # 图表显示
+        # 6. 图表
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=dca.index, y=dca['Value'], name="账户市值", fill='tonexty', line=dict(color='#F3BA2F')))
-        fig.add_trace(go.Scatter(x=dca.index, y=dca['Cost'], name="投入本金", line=dict(color='gray', dash='dash')))
-        fig.update_layout(title=f"{coin} 定投实时分析图", hovermode="x unified")
+        fig.add_trace(go.Scatter(x=dca.index, y=dca['Close']*total_qty, name="历史市值路径", fill='tonexty', line=dict(color='#11d3bc')))
+        fig.add_trace(go.Scatter(x=dca.index, y=[amount*(i+1) for i in range(len(dca))], name="投入本金", line=dict(color='gray', dash='dash')))
+        fig.update_layout(title=f"{coin} 定投实时联动分析", template="plotly_white", hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
 except Exception as e:
-    st.error(f"数据更新中... {e}")
+    st.error(f"正在同步 CMC 数据... {e}")
