@@ -7,7 +7,7 @@ import requests
 
 # 1. 网页配置
 st.set_page_config(page_title="專業定投分析工具", layout="wide")
-st.title("🧡 定投全景分析：精准盈亏对齐版")
+st.title("BTC定投")
 
 # --- UI 优化补丁 ---
 st.markdown("""
