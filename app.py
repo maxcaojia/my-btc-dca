@@ -7,7 +7,25 @@ import requests
 
 # 1. 网页配置
 st.set_page_config(page_title="专业定投回测工具", layout="wide")
-st.title("🧡 定投深度回测：北京时间 8:00 联动版")
+
+# --- UI 优化补丁：解决数字显示不全问题 ---
+st.markdown("""
+    <style>
+    /* 让指标卡片的数字根据屏幕自动缩放字体大小 */
+    [data-testid="stMetricValue"] {
+        font-size: 1.6vw !important; 
+        min-size: 14px;
+        white-space: nowrap;
+    }
+    /* 缩小标签字体 */
+    [data-testid="stMetricLabel"] {
+        font-size: 0.9vw !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+# -----------------------------------
+
+st.title("定投历史回测")
 
 # 2. API Key 获取 (从 Secrets 读取)
 cmc_api_key = st.secrets.get("CMC_API_KEY") if "CMC_API_KEY" in st.secrets else None
