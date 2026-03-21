@@ -29,12 +29,21 @@ try:
     if df_raw.empty:
         st.warning("⚠️ 该日期范围内没有数据，请尝试更早或更晚的日期。")
     else:
-        # 4. 定投逻辑计算
+        #4. 定投逻辑计算 (更加兼容的写法)
         resample_freq = "D" if frequency == "每天" else ("W" if frequency == "每周" else "MS")
-        # 兼容 yfinance 的多级索引格式
-        dca = df_raw['Close'].resample(resample_freq).first().to_frame()
         
-        dca['Cumulative_Cost'] = range(amount, (len(dca)+1)*amount, amount)
+        # 提取收盘价并确保它是 DataFrame 格式
+        close_prices = df_raw['Close']
+        dca = close_prices.resample(resample_freq).first()
+        
+        # 如果 resample 后还是 Series，将其转为 DataFrame
+        if isinstance(dca, pd.Series):
+            dca = dca.to_frame()
+        
+        # 重命名列名，防止索引混乱
+        dca.columns = ['Close']
+        
+        dca['Cumulative_Cost'] = [amount * (i + 1) for i in range(len(dca))]
         dca['Bought_Qty'] = amount / dca['Close']
         dca['Total_Qty'] = dca['Bought_Qty'].cumsum()
         dca['Portfolio_Value'] = dca['Total_Qty'] * dca['Close']
