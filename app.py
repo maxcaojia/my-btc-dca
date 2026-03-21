@@ -25,7 +25,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 # -----------------------------------
 
-st.title("定投历史回测")
+st.title("BTC定投历史回测")
 
 # 2. API Key 获取 (从 Secrets 读取)
 cmc_api_key = st.secrets.get("CMC_API_KEY") if "CMC_API_KEY" in st.secrets else None
