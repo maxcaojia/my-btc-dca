@@ -3,99 +3,81 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
+import time
 
-# 1. 网页基础设置
-st.set_page_config(page_title="Crypto 定投全历史回测", layout="wide")
-st.title("📈 BTC/Altcoin 定投全历史回测工具")
-st.markdown("---")
+# 1. 网页配置
+st.set_page_config(page_title="Crypto 定投终极版", layout="wide")
+st.title("🛡️ 稳定版：BTC/Altcoin 定投回测工具")
 
-# 2. 侧边栏交互设置
+# 2. 侧边栏
 with st.sidebar:
     st.header("⚙️ 策略设置")
     coin = st.selectbox("选择币种", ["BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "NVDA", "AAPL"])
     symbol = f"{coin}-USD" if coin not in ["NVDA", "AAPL"] else coin
     
-    # 默认日期设为 2015 年，方便回测大周期
+    # 默认日期回溯到 2015 年
     start_date = st.date_input("开始定投日期", value=datetime(2015, 1, 1))
     amount = st.number_input("每次投入金额 ($)", min_value=1, value=100)
-    
     frequency = st.selectbox("定投频率", ["每天", "每周", "每月初"], index=1)
     freq_map = {"每天": "D", "每周": "W", "每月初": "MS"}
 
-# 3. 稳健的数据抓取逻辑
-@st.cache_data(ttl=3600)
-def get_historical_data(symbol, start):
-    try:
-        # 下载数据
-        df = yf.download(symbol, start=start, progress=False)
-        if df.empty:
-            return None
-        
-        # 核心修复：处理多级索引和列名问题
-        # 不管它返回几层，直接找名为 'Close' 的第一列
-        if isinstance(df.columns, pd.MultiIndex):
-            # 如果是多级索引，取第一级为 'Close' 的那一列
-            df_close = df['Close'].iloc[:, 0]
-        else:
-            df_close = df['Close']
-            
-        return df_close.to_frame(name='Close')
-    except Exception as e:
-        st.error(f"连接数据源失败: {e}")
-        return None
+# 3. 增强版数据抓取（带重试和多层索引破解）
+@st.cache_data(ttl=3600) # 缓存 1 小时，减少对雅虎的请求压力
+def get_safe_data(symbol, start):
+    # 尝试最多 3 次请求
+    for _ in range(3):
+        try:
+            df = yf.download(symbol, start=start, progress=False, auto_adjust=True)
+            if not df.empty:
+                # 关键修复：强制处理多级索引 (MultiIndex)
+                if isinstance(df.columns, pd.MultiIndex):
+                    # 只提取 'Close' 这一层级的数据
+                    df_final = df['Close'].iloc[:, 0].to_frame(name='Close')
+                else:
+                    df_final = df[['Close']]
+                return df_final
+        except Exception:
+            time.sleep(1) # 失败了等一秒再试
+            continue
+    return None
 
-# 4. 执行测算
+# 4. 逻辑处理
 try:
-    data = get_historical_data(symbol, start_date)
+    data = get_safe_data(symbol, start_date)
     
     if data is None or len(data) < 2:
-        st.warning(f"⚠️ 没找到 {coin} 在该时段的数据。小贴士：很多代币（如 SOL/BNB）在 2017 年前尚未诞生。")
+        st.error("⚠️ 数据源连接不稳定（雅虎限流）。请尝试点击右上角 'Rerun' 或稍后刷新。")
+        st.info("提示：如果选的日期太早（币还没出生），也会看到这个错误。")
     else:
-        # 按照频率重采样
+        # 清洗数据并按频率重采样
         dca = data['Close'].resample(freq_map[frequency]).first().to_frame()
-        dca = dca.dropna() # 剔除空值
+        dca = dca.dropna()
 
-        # 定投核心算法
+        # 计算核心指标
         dca['Cumulative_Cost'] = [amount * (i + 1) for i in range(len(dca))]
         dca['Bought_Qty'] = amount / dca['Close']
         dca['Total_Qty'] = dca['Bought_Qty'].cumsum()
         dca['Portfolio_Value'] = dca['Total_Qty'] * dca['Close']
         
-        # 核心指标看板
-        final_cost = dca['Cumulative_Cost'].iloc[-1]
-        final_value = dca['Portfolio_Value'].iloc[-1]
-        avg_price = final_cost / dca['Total_Qty'].iloc[-1]
-        current_price = dca['Close'].iloc[-1]
-        roi = (final_value - final_cost) / final_cost * 100
+        f_cost = dca['Cumulative_Cost'].iloc[-1]
+        f_val = dca['Portfolio_Value'].iloc[-1]
+        avg_p = f_cost / dca['Total_Qty'].iloc[-1]
+        curr_p = dca['Close'].iloc[-1]
+        roi = (f_val - f_cost) / f_cost * 100
 
-        # UI 显示：四个指标卡片
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("累计投入 (Cost)", f"${final_cost:,.0f}")
-        col2.metric("持仓均价 (Avg)", f"${avg_price:,.2f}")
-        col3.metric("当前价值 (Value)", f"${final_value:,.0f}", f"{roi:.2f}%")
-        col4.metric("最新价格 (Price)", f"${current_price:,.2f}")
+        # UI 显示
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("累计投入", f"${f_cost:,.0f}")
+        c2.metric("持仓均价", f"${avg_p:,.2f}")
+        c3.metric("当前市值", f"${f_val:,.0f}", f"{roi:.2f}%")
+        c4.metric("最新币价", f"${curr_p:,.2f}")
 
-        # 5. 可视化图表
+        # 绘图
         fig = go.Figure()
-        # 投入本金线
-        fig.add_trace(go.Scatter(x=dca.index, y=dca['Cumulative_Cost'], 
-                                 name="投入本金", line=dict(color='gray', dash='dash')))
-        # 账户市值曲线
-        fig.add_trace(go.Scatter(x=dca.index, y=dca['Portfolio_Value'], 
-                                 name="账户市值", fill='tonexty', line=dict(color='#F3BA2F', width=3)))
-        
-        fig.update_layout(
-            title=f"{coin} 定投增长曲线 ({start_date} 至今)",
-            xaxis_title="年份",
-            yaxis_title="金额 (USD)",
-            hovermode="x unified",
-            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
-        )
+        fig.add_trace(go.Scatter(x=dca.index, y=dca['Cumulative_Cost'], name="本金", line=dict(color='gray', dash='dash')))
+        fig.add_trace(go.Scatter(x=dca.index, y=dca['Portfolio_Value'], name="市值", fill='tonexty', line=dict(color='#F3BA2F')))
+        fig.update_layout(hovermode="x unified", title=f"{coin} 定投回报分析")
         st.plotly_chart(fig, use_container_width=True)
 
-        # 底部详情
-        with st.expander("📂 查看定投数据详情表"):
-            st.dataframe(dca.style.format("{:.2f}"), use_container_width=True)
-
 except Exception as e:
-    st.error(f"程序计算时发生预料外的错误: {e}")
+    st.warning(f"正在等待数据同步... 如果长时间不动请尝试刷新。详情: {e}")
