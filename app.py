@@ -7,7 +7,7 @@ import requests
 
 # 1. 网页基础配置
 st.set_page_config(page_title="加密货币多资产回测工具", layout="wide")
-st.title("🧡 多资产定投全景分析 (精准对齐专业版)")
+st.title("🧡 CRYPTO定投")
 
 # --- UI 样式优化：确保数字显示不全时自动缩放 ---
 st.markdown("""
