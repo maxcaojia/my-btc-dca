@@ -7,7 +7,7 @@ import requests
 
 # 1. 网页配置
 st.set_page_config(page_title="專業定投分析工具", layout="wide")
-st.title("BTC定投")
+st.title("CRYPTO定投")
 
 # --- UI 优化补丁 ---
 st.markdown("""
