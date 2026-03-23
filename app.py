@@ -16,7 +16,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("💎 CMC 实时联动：任意区间定投回测终端")
+st.title("CRYPTO DCA")
 
 # 2. 从后台获取你的 API Key
 cmc_api_key = st.secrets.get("CMC_API_KEY")
