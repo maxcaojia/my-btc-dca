@@ -8,16 +8,32 @@ import requests
 # 1. 网页基础配置
 st.set_page_config(page_title="CRYPTO定投專業分析", layout="wide")
 
-# --- UI 样式优化：确保数字显示清晰且自动缩放 ---
+# --- UI 样式优化补丁：解决显示不全、日历遮挡及层级问题 ---
 st.markdown("""
     <style>
-    [data-testid="stMetricValue"] { font-size: max(14px, 1.6vw) !important; white-space: nowrap; color: #FF8C00; }
+    /* 1. 确保指标卡片数字清晰且自动缩放 */
+    [data-testid="stMetricValue"] { 
+        font-size: max(14px, 1.6vw) !important; 
+        white-space: nowrap; 
+        color: #FF8C00; 
+    }
     [data-testid="stMetricLabel"] { font-size: 0.9vw !important; }
+    
+    /* 2. 强制让日历组件浮动在最上层，防止被侧边栏或标题挡住 */
+    div[data-baseweb="datepicker"], div[data-baseweb="popover"] {
+        z-index: 999999 !important;
+    }
+    
+    /* 3. 增加侧边栏底部间距，确保底部的日历有空间向下弹出 */
+    section[data-testid="stSidebar"] > div {
+        padding-bottom: 300px !important;
+    }
+    
     .stSuccess { background-color: rgba(255, 140, 0, 0.1) !important; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🧡 CRYPTO定投全景分析 (專業版)")
+st.title("🧡 CRYPTO定投全景分析 (終極修復版)")
 
 # 2. 从后台获取 API Key
 cmc_api_key = st.secrets.get("CMC_API_KEY")
@@ -59,7 +75,6 @@ def get_cmc_price(symbol, api_key):
 @st.cache_data(ttl=300)
 def get_crypto_data(coin_sym, start, end):
     symbol = f"{coin_sym}-USD"
-    # 多抓一天确保包含结束日
     df_raw = yf.download(symbol, start=start, end=end + timedelta(days=1), progress=False)
     if df_raw.empty: return None
     
@@ -69,7 +84,7 @@ def get_crypto_data(coin_sym, start, end):
         temp = df_raw['Close']
     
     res = temp.to_frame(name='Price')
-    res.index = res.index + timedelta(hours=8) # 北京时间 08:00
+    res.index = res.index + timedelta(hours=8)
     return res.dropna()
 
 # --- 核心逻辑执行 ---
@@ -94,11 +109,9 @@ try:
             df['Cum_Qty'] = df['Qty_Step'].cumsum()
             df['Avg_Price'] = (df['Cum_Cost'] / df['Cum_Qty']).fillna(0)
             df['Market_Value'] = df['Cum_Qty'] * df['Price']
-            # 盈亏百分比：保留两位小数
             df['ROI_Pct'] = (((df['Price'] - df['Avg_Price']) / df['Avg_Price']) * 100).fillna(0).round(2)
 
             # C. 实时数据对齐
-            # 只有当截止日期是今天或未来，才调用 CMC 实时价
             is_to_now = end_date >= datetime.now().date()
             live_p = get_cmc_price(coin, cmc_api_key) if is_to_now else None
             
@@ -117,12 +130,12 @@ try:
             m2.metric(f"累计持仓 {coin}", f"{final_qty:.4f}")
             m3.metric("持仓均价", f"${final_avg:,.2f}")
             m4.metric("实时价 vs 均价", f"{(final_p-final_avg)/final_avg*100:+.2f}%", delta_color="inverse")
-            m5.metric("截止市值/实时市值", f"${final_val:,.0f}", f"{final_roi:+.2f}%")
+            m5.metric("截止市值", f"${final_val:,.0f}", f"{final_roi:+.2f}%")
 
             if live_p and is_to_now:
                 st.success(f"✅ CMC 實時數據已掛載：{coin} 現價 ${live_p:,.2f}")
 
-            # E. 增强版 Plotly 图表
+            # E. 增强版 Plotly 图表 (带本金、市值、币价、盈亏比)
             fig = go.Figure()
 
             # 1. 账户市值 (主曲线：橙色填充)
@@ -133,7 +146,6 @@ try:
                 fill='tonexty', 
                 line=dict(color='#FF8C00', width=2.5),
                 fillcolor='rgba(255, 140, 0, 0.15)',
-                # 悬停显示：包含币价、累计本金、市值、盈亏比
                 hovertemplate=(
                     "<b>📅 日期: %{x}</b><br>" +
                     f"🪙 当时 {coin} 价格: " + "$%{customdata[0]:,.2f}<br>" +
@@ -163,7 +175,7 @@ try:
             # 4. 图表布局
             fig.update_layout(
                 title=f"<b>{coin} 资产增长细节分析 (区间回测)</b>",
-                xaxis_title="日期 (北京时间 08:00)",
+                xaxis_title="日期 (北京时间 08:00 对齐)",
                 yaxis_title="价值 (USD)",
                 hovermode="x unified",
                 template="plotly_white",
