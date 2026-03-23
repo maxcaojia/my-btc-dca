@@ -33,7 +33,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🧡 CRYPTO定投全景分析 (終極修復版)")
+st.title("🧡 CRYPTO定投全景分析 ")
 
 # 2. 从后台获取 API Key
 cmc_api_key = st.secrets.get("CMC_API_KEY")
