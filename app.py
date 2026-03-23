@@ -1,46 +1,46 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
+import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import requests
 
 # 1. 网页基础配置
-st.set_page_config(page_title="CMC 区间定投回测", layout="wide")
+st.set_page_config(page_title="CRYPTO定投專業分析", layout="wide")
 
-# --- UI 样式优化 ---
+# --- UI 样式优化：确保数字显示清晰且自动缩放 ---
 st.markdown("""
     <style>
-    [data-testid="stMetricValue"] { font-size: 1.6vw !important; color: #FF8C00; }
+    [data-testid="stMetricValue"] { font-size: max(14px, 1.6vw) !important; white-space: nowrap; color: #FF8C00; }
+    [data-testid="stMetricLabel"] { font-size: 0.9vw !important; }
     .stSuccess { background-color: rgba(255, 140, 0, 0.1) !important; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("CRYPTO DCA")
+st.title("🧡 CRYPTO定投全景分析 (專業版)")
 
-# 2. 从后台获取你的 API Key
+# 2. 从后台获取 API Key
 cmc_api_key = st.secrets.get("CMC_API_KEY")
 
 # 3. 侧边栏：区间与策略配置
 with st.sidebar:
     st.header("📅 时间区间设置")
-    # 让你可以自由选择开始和结束
     start_date = st.date_input("定投开始日期", value=datetime(2024, 3, 15))
     end_date = st.date_input("定投截止日期", value=datetime(2025, 4, 15))
     
     if start_date >= end_date:
-        st.error("错误：开始日期必须早于截止日期")
+        st.error("❌ 错误：开始日期必须早于截止日期")
         st.stop()
 
     st.header("⚙️ 资产与频率")
-    coin = st.selectbox("同步币种", ["BTC", "ETH", "SOL", "BNB", "XRP"])
+    coin = st.selectbox("选择切换币种", ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA"])
     amount = st.number_input("每期定投金额 ($)", min_value=1, value=100)
     frequency = st.selectbox("定投频率", ["每天", "每周", "每月"], index=0)
     
     target_day = 0
     if frequency == "每周":
         weekday_map = {"周一": 0, "周二": 1, "周三": 2, "周四": 3, "周五": 4, "周六": 5, "周日": 6}
-        selected_day = st.selectbox("选择周定投日", list(weekday_map.keys()))
+        selected_day = st.selectbox("选择每周定投日", list(weekday_map.keys()))
         target_day = weekday_map[selected_day]
     elif frequency == "每月":
         target_day = st.slider("选择月定投日期", 1, 28, 1)
@@ -55,25 +55,30 @@ def get_cmc_price(symbol, api_key):
         return r.json()['data'][symbol]['quote']['USD']['price']
     except: return None
 
-# --- 执行引擎 ---
-try:
-    with st.spinner(f'正在分析 {start_date} 至 {end_date} 的数据...'):
-        # 抓取数据（稍微多抓一点以确保包含边界）
-        symbol = f"{coin}-USD"
-        df_raw = yf.download(symbol, start=start_date, end=end_date + timedelta(days=1), progress=False)
-        
-        if df_raw.empty:
-            st.error("该区间内无有效行情数据。")
-        else:
-            # 数据清洗
-            if isinstance(df_raw.columns, pd.MultiIndex):
-                df = df_raw.xs('Close', axis=1, level=0)[symbol].to_frame(name='Price')
-            else:
-                df = df_raw[['Close']].rename(columns={'Close': 'Price'})
-            
-            df.index = df.index + timedelta(hours=8) # 北京时间对齐
+# --- 函数：清洗数据 ---
+@st.cache_data(ttl=300)
+def get_crypto_data(coin_sym, start, end):
+    symbol = f"{coin_sym}-USD"
+    # 多抓一天确保包含结束日
+    df_raw = yf.download(symbol, start=start, end=end + timedelta(days=1), progress=False)
+    if df_raw.empty: return None
+    
+    if isinstance(df_raw.columns, pd.MultiIndex):
+        temp = df_raw.xs('Close', axis=1, level=0)[symbol]
+    else:
+        temp = df_raw['Close']
+    
+    res = temp.to_frame(name='Price')
+    res.index = res.index + timedelta(hours=8) # 北京时间 08:00
+    return res.dropna()
 
-            # A. 标记定投触发
+# --- 核心逻辑执行 ---
+try:
+    with st.spinner(f'正在同步 {coin} 数据...'):
+        df = get_crypto_data(coin, start_date, end_date)
+        
+        if df is not None:
+            # A. 标记定投日
             if frequency == "每天":
                 df['Is_DCA'] = True
             elif frequency == "每周":
@@ -81,60 +86,94 @@ try:
             else:
                 df['Is_DCA'] = df.index.day == target_day
 
-            # B. 核心财务计算
+            # B. 财务计算
             df['Cost_Step'] = df['Is_DCA'].apply(lambda x: amount if x else 0)
-            df['Qty_Step'] = df.apply(lambda r: r['Cost_Step']/r['Price'] if r['Is_DCA'] else 0, axis=1)
+            df['Qty_Step'] = df.apply(lambda row: row['Cost_Step'] / row['Price'] if row['Is_DCA'] else 0, axis=1)
             
-            df['Total_Cost'] = df['Cost_Step'].cumsum()
-            df['Total_Qty'] = df['Qty_Step'].cumsum()
-            df['Avg_Price'] = (df['Total_Cost'] / df['Total_Qty']).fillna(0)
-            df['Portfolio_Value'] = df['Total_Qty'] * df['Price']
+            df['Cum_Cost'] = df['Cost_Step'].cumsum()
+            df['Cum_Qty'] = df['Qty_Step'].cumsum()
+            df['Avg_Price'] = (df['Cum_Cost'] / df['Cum_Qty']).fillna(0)
+            df['Market_Value'] = df['Cum_Qty'] * df['Price']
+            # 盈亏百分比：保留两位小数
             df['ROI_Pct'] = (((df['Price'] - df['Avg_Price']) / df['Avg_Price']) * 100).fillna(0).round(2)
 
-            # C. 实时数据对接（仅当截止日期是今天或以后时才显示实时价）
+            # C. 实时数据对齐
+            # 只有当截止日期是今天或未来，才调用 CMC 实时价
             is_to_now = end_date >= datetime.now().date()
             live_p = get_cmc_price(coin, cmc_api_key) if is_to_now else None
             
-            # 最终回测点数据
-            f_price = live_p if (live_p and is_to_now) else df['Price'].iloc[-1]
-            f_cost = df['Total_Cost'].iloc[-1]
-            f_qty = df['Total_Qty'].iloc[-1]
-            f_avg = f_cost / f_qty if f_qty > 0 else 0
-            f_val = f_qty * f_price
-            f_roi = ((f_val - f_cost) / f_cost * 100) if f_cost > 0 else 0
+            final_p = live_p if (live_p and is_to_now) else df['Price'].iloc[-1]
+            final_cost = df['Cum_Cost'].iloc[-1]
+            final_qty = df['Cum_Qty'].iloc[-1]
+            final_avg = final_cost / final_qty if final_qty > 0 else 0
+            final_val = final_qty * final_p
+            final_roi = ((final_val - final_cost) / final_cost * 100) if final_cost > 0 else 0
 
-            # D. 指标渲染
-            st.info(f"📅 回测区间：{start_date} 至 {end_date} (共计定投 {len(df[df['Is_DCA']])} 期)")
+            # D. 渲染顶部指标
+            st.info(f"📊 区间统计：{start_date} 至 {end_date} | 共计定投 {len(df[df['Is_DCA']])} 期")
             
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("区间总投入", f"${f_cost:,.0f}")
-            m2.metric(f"累计持仓 {coin}", f"{f_qty:.4f}")
-            m3.metric("区间持仓均价", f"${f_avg:,.2f}")
-            m4.metric("区间盈亏率", f"{f_roi:+.2f}%")
-            m5.metric("截止日市值", f"${f_val:,.0f}")
+            m1.metric("区间总投入", f"${final_cost:,.0f}")
+            m2.metric(f"累计持仓 {coin}", f"{final_qty:.4f}")
+            m3.metric("持仓均价", f"${final_avg:,.2f}")
+            m4.metric("实时价 vs 均价", f"{(final_p-final_avg)/final_avg*100:+.2f}%", delta_color="inverse")
+            m5.metric("截止市值/实时市值", f"${final_val:,.0f}", f"{final_roi:+.2f}%")
 
-            # E. 绘图
+            if live_p and is_to_now:
+                st.success(f"✅ CMC 實時數據已掛載：{coin} 現價 ${live_p:,.2f}")
+
+            # E. 增强版 Plotly 图表
             fig = go.Figure()
-            # 市值增长
+
+            # 1. 账户市值 (主曲线：橙色填充)
             fig.add_trace(go.Scatter(
-                x=df.index, y=df['Portfolio_Value'], name="账户市值", 
-                fill='tonexty', line=dict(color='#FF8C00', width=2),
-                hovertemplate="日期: %{x}<br>当时币价: $%{customdata[0]:,.2f}<br>盈亏比: %{customdata[1]:+.2f}%<extra></extra>",
-                customdata=df[['Price', 'ROI_Pct']].values
+                x=df.index, 
+                y=df['Market_Value'], 
+                name="账户市值", 
+                fill='tonexty', 
+                line=dict(color='#FF8C00', width=2.5),
+                fillcolor='rgba(255, 140, 0, 0.15)',
+                # 悬停显示：包含币价、累计本金、市值、盈亏比
+                hovertemplate=(
+                    "<b>📅 日期: %{x}</b><br>" +
+                    f"🪙 当时 {coin} 价格: " + "$%{customdata[0]:,.2f}<br>" +
+                    "💰 累计投入本金: $%{customdata[1]:,.0f}<br>" +
+                    "📈 账户当前市值: $%{y:,.0f}<br>" +
+                    "<b>📊 实时盈亏比例: %{customdata[2]:+.2f}%</b>" +
+                    "<extra></extra>"
+                ),
+                customdata=df[['Price', 'Cum_Cost', 'ROI_Pct']].values
             ))
-            # 本金线
-            fig.add_trace(go.Scatter(x=df.index, y=df['Total_Cost'], name="本金线", line=dict(color='gray', dash='dash')))
+
+            # 2. 投入本金线 (灰色虚线)
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['Cum_Cost'], name="累计本金线", 
+                line=dict(color='#666666', dash='dash', width=2),
+                hoverinfo='skip'
+            ))
             
+            # 3. BTC 减半标注
+            if coin == "BTC":
+                for h in ['2020-04-11', '2024-04-20']:
+                    h_dt = pd.to_datetime(h) + timedelta(hours=8)
+                    if h_dt >= df.index.min() and h_dt <= df.index.max():
+                        fig.add_vline(x=h_dt.timestamp() * 1000, line_dash="dot", line_color="red", 
+                                     annotation_text="BTC 减半", annotation_position="top left")
+
+            # 4. 图表布局
             fig.update_layout(
-                title=f"{coin} 区间定投表现分析",
-                template="plotly_white", 
-                hovermode="x unified", 
-                height=550
+                title=f"<b>{coin} 资产增长细节分析 (区间回测)</b>",
+                xaxis_title="日期 (北京时间 08:00)",
+                yaxis_title="价值 (USD)",
+                hovermode="x unified",
+                template="plotly_white",
+                height=600,
+                legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            with st.expander("📂 查看定投详细日志"):
-                st.dataframe(df[df['Is_DCA']][['Price', 'Total_Cost', 'Total_Qty', 'Avg_Price']].style.format("{:.2f}"))
+            with st.expander("📂 查看详细定投账单"):
+                st.dataframe(df[['Price', 'Avg_Price', 'Cum_Qty', 'ROI_Pct', 'Market_Value']].style.format("{:.2f}"))
 
 except Exception as e:
-    st.error(f"分析出错：{e}")
+    st.error(f"❌ 运行异常：{e}")
