@@ -109,3 +109,30 @@ try:
             final_qty = df['Cum_Qty'].iloc[-1]
             final_avg = final_cost / final_qty if final_qty > 0 else 0
             final_val = final_qty * final_p
+            final_roi = ((final_val - final_cost) / final_cost * 100) if final_cost > 0 else 0
+
+            # 渲染顶部指标
+            st.info(f"📊 统计区间：{start_date} 至 {end_date}")
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("区间总投入", f"${final_cost:,.0f}")
+            m2.metric(f"累计持仓", f"{final_qty:.4f}")
+            m3.metric("持仓均价", f"${final_avg:,.2f}")
+            m4.metric("实时价对比", f"{(final_p-final_avg)/final_avg*100:+.2f}%", delta_color="inverse")
+            m5.metric("最终/实时市值", f"${final_val:,.0f}", f"{final_roi:+.2f}%")
+
+            # 图表绘图 (Hover 保持本金市值显示)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['Market_Value'], name="市值", fill='tonexty', 
+                line=dict(color='#FF8C00', width=2),
+                hovertemplate="<b>日期: %{x}</b><br>累计投入: $%{customdata[1]:,.0f}<br>账户市值: $%{y:,.0f}<br>盈亏比: %{customdata[2]:+.2f}%<extra></extra>",
+                customdata=df[['Price', 'Cum_Cost', 'ROI_Pct']].values
+            ))
+            fig.add_trace(go.Scatter(x=df.index, y=df['Cum_Cost'], name="本金线", line=dict(color='gray', dash='dash')))
+            fig.update_layout(template="plotly_white", hovermode="x unified", height=600)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.error("无法加载数据，请检查网络连接或尝试缩短日期区间。")
+
+except Exception as e:
+    st.error(f"❌ 程序遇到未知错误: {e}")
