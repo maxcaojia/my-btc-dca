@@ -5,11 +5,11 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import requests
+import time
 
 # 1. 网页基础配置
-st.set_page_config(page_title="AHR999 全動態回測系統", layout="wide")
+st.set_page_config(page_title="AHR999 自定義探測器", layout="wide")
 
-# --- UI 样式補丁 ---
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: max(14px, 1.6vw) !important; white-space: nowrap; color: #FF8C00; }
@@ -18,94 +18,117 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🧡 AHR999 全動態歷史探測器")
+st.title("🧡 AHR999 自定義參數回測終端")
 
-# 2. 侧边栏：核心交互
+# 2. 侧边栏：核心控制
 with st.sidebar:
-    st.header("📅 1. 自定義回測區間")
-    # 這裡現在完全由你決定，不再死板
-    start_date = st.date_input("回測開始日期", value=datetime(2020, 1, 1))
-    end_date = st.date_input("回測截止日期", value=datetime.now().date())
+    st.header("📅 1. 区间设置")
+    start_date = st.date_input("开始日期", value=datetime(2020, 1, 1))
+    end_date = st.date_input("截止日期", value=datetime.now().date())
     
-    st.header("🎯 2. AHR999 門檻設置")
-    target_ahr = st.slider("自定義探測閾值 (顯示低於此值的日子)", 0.1, 3.0, 0.45, step=0.01)
+    st.header("🎯 2. AHR999 探測參數")
+    # --- 新增：用户自定义阈值 ---
+    target_ahr = st.slider("自定义 AHR999 警戒线", 0.1, 5.0, 0.45, step=0.01)
+    st.caption(f"当前统计所有 AHR999 < {target_ahr:.2f} 的历史时刻")
 
-    st.header("⚙️ 3. 策略參數")
-    amount = st.number_input("每期定投金額 ($)", min_value=1, value=100)
-    frequency = st.selectbox("定投頻率", ["每天", "每周", "每月"], index=0)
+    st.header("⚙️ 3. 资产配置")
+    coin = st.selectbox("选择资产", ["BTC", "ETH", "SOL", "BNB"], index=0)
+    amount = st.number_input("每期定投金额 ($)", min_value=1, value=100)
+    frequency = st.selectbox("定投频率", ["每天", "每周", "每月"], index=0)
 
-    if st.button("🔄 刷新並重新計算"):
+    if st.button("🔄 刷新全部数据"):
         st.cache_data.clear()
         st.rerun()
 
-# --- 核心算法：幾何平均對齊 ---
-def calculate_ahr999_dynamic(df):
-    # 幾何平均計算 (200日)
-    df['Log_Price'] = np.log(df['Price'])
-    df['Geo_MA200'] = np.exp(df['Log_Price'].rolling(window=200).mean())
-    # 九神擬合線
+# --- AHR999 计算函数 ---
+def calculate_ahr_full(df):
+    df['MA200'] = df['Price'].rolling(window=200).mean()
     genesis = pd.to_datetime('2009-01-03')
-    df['Days_Since'] = (df.index - genesis).days
-    df['Fit_Price'] = 10**(5.84 * np.log10(df['Days_Since']) - 17.01)
-    # AHR999 計算
-    df['AHR999'] = ((df['Price'] / df['Fit_Price']) * (df['Price'] / df['Geo_MA200'])).round(2)
+    df['Days'] = (df.index - genesis).days
+    df['Fit'] = 10**(5.84 * np.log10(df['Days']) - 17.01)
+    df['AHR999'] = ((df['Price'] / df['Fit']) * (df['Price'] / df['MA200'])).round(2)
     return df
 
 @st.cache_data(ttl=600)
-def fetch_data(start, end):
-    symbol = "BTC-USD"
-    # 為了確保起始日的 MA200 準確，自動向前追溯 400 天
-    f_start = start - timedelta(days=400)
+def fetch_and_calc(coin_sym, start, end):
+    symbol = f"{coin_sym}-USD"
+    f_start = start - timedelta(days=350) # 预留均线计算空间
     try:
-        data = yf.download(symbol, start=f_start, end=end + timedelta(days=1), progress=False)
+        data = yf.download(symbol, start=f_start, end=end + timedelta(days=1), progress=False, timeout=20)
         if data.empty: return None
-        # 數據提取與 UTC+8 對齊
         df = data.xs('Close', axis=1, level=0)[symbol].to_frame(name='Price') if isinstance(data.columns, pd.MultiIndex) else data[['Close']].rename(columns={'Close': 'Price'})
         df.index = df.index + timedelta(hours=8)
-        df = calculate_ahr999_dynamic(df)
-        # 精準切回用戶選定的時間段
+        df = calculate_ahr_full(df)
         return df[df.index >= pd.to_datetime(start)]
     except: return None
 
-# --- 執行引擎 ---
+# --- 执行主逻辑 ---
 try:
-    df_raw = fetch_data(start_date, end_date)
+    df = fetch_and_calc(coin, start_date, end_date)
     
-    if df_raw is not None:
-        # 1. 篩選邏輯：完全響應 slider 的數值
-        df_filtered = df_raw[df_raw['AHR999'] < target_ahr].copy()
-        
-        # 2. 頂部看板
-        m1, m2, m3 = st.columns(3)
-        m1.metric("當前區間最新指數", f"{df_raw.iloc[-1]['AHR999']:.2f}")
-        m2.metric(f"符合閾值 ({target_ahr}) 天數", f"{len(df_filtered)} 天")
-        m3.metric("該狀態下平均幣價", f"${df_filtered['Price'].mean():,.2f}" if not df_filtered.empty else "N/A")
+    if df is not None:
+        # 1. 基础定投计算
+        if frequency == "每天": df['Is_DCA'] = True
+        elif frequency == "每周": df['Is_DCA'] = df.index.weekday == 0
+        else: df['Is_DCA'] = df.index.day == 1
 
-        # 3. 趨勢圖表 (藍色實線)
+        df['Cost_In'] = df['Is_DCA'].apply(lambda x: amount if x else 0)
+        df['Qty_In'] = df.apply(lambda r: r['Cost_In'] / r['Price'] if r['Is_DCA'] else 0, axis=1)
+        df['Cum_Cost'] = df['Cost_In'].cumsum()
+        df['Cum_Qty'] = df['Qty_Step'] = df['Qty_In'].cumsum()
+        df['Portfolio_Value'] = df['Cum_Qty'] * df['Price']
+        df['ROI_Pct'] = (((df['Portfolio_Value'] - df['Cum_Cost']) / df['Cum_Cost']) * 100).fillna(0).round(2)
+
+        # 2. --- 核心：动态探测统计 ---
+        # 筛选低于用户设定阈值的日子
+        hit_df = df[df['AHR999'] < target_ahr].copy()
+        
+        # 3. 顶部指标展示
+        latest = df.iloc[-1]
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("最新 AHR999", f"{latest['AHR999']:.2f}")
+        m2.metric(f"指数 < {target_ahr:.2f} 天数", f"{len(hit_df)}天")
+        m3.metric("区间平均买入价", f"${hit_df['Price'].mean():,.2f}" if not hit_df.empty else "N/A")
+        m4.metric("全段总盈亏", f"{latest['ROI_Pct']:+.2f}%")
+
+        # 4. 图表渲染 (增加阈值参考线)
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df_raw.index, y=df_raw['AHR999'], name="AHR999指數", line=dict(color='blue', width=2)))
-        fig.add_hline(y=target_ahr, line_dash="dash", line_color="red", annotation_text=f"你的探測線:{target_ahr}")
-        fig.update_layout(template="plotly_white", title="AHR999 歷史走勢", yaxis=dict(title="指數值", range=[0, 3]))
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['Portfolio_Value'], name="市值", fill='tonexty', line=dict(color='#FF8C00', width=2),
+            hovertemplate="日期: %{x}<br>AHR999: %{customdata:.2f}<extra></extra>",
+            customdata=df['AHR999']
+        ))
+        fig.add_trace(go.Scatter(x=df.index, y=df['AHR999'], name="AHR999指数", line=dict(color='blue', width=1, dash='dot'), yaxis="y2"))
+        
+        # 增加动态参考线
+        fig.add_hline(y=target_ahr, line_dash="dash", line_color="red", annotation_text=f"你的探測線({target_ahr})", yref="y2")
+
+        fig.update_layout(
+            template="plotly_white", hovermode="x unified", height=500,
+            yaxis2=dict(title="AHR999", overlaying="y", side="right", range=[0, 3])
+        )
         st.plotly_chart(fig, use_container_width=True)
 
-        # 4. 全量數據表 (移除 tail 限制)
-        st.subheader(f"📋 數據明細：AHR999 < {target_ahr:.2f} (全區間追蹤)")
-        if not df_filtered.empty:
-            # 這裡會顯示該區間內所有的符合條件的數據，不再被截斷
-            st.dataframe(df_filtered[['Price', 'AHR999', 'Geo_MA200', 'Fit_Price']].style.format({
-                "Price": "${:,.2f}", "AHR999": "{:.2f}", "Geo_MA200": "${:,.2f}", "Fit_Price": "${:,.2f}"
-            }), height=400) # 設置高度以便滾動查看
+        # --- 5. 动态探测结果明细 ---
+        st.subheader(f"📋 AHR999 < {target_ahr:.2f} 时的详细统计")
+        if not hit_df.empty:
+            stats_data = {
+                "指标项目": ["出现天数", "期间平均币价", "期间最低币价", "期间最高币价", "期间平均指数值", "指数最低点"],
+                "数值详情": [
+                    f"{len(hit_df)} 天",
+                    f"${hit_df['Price'].mean():,.2f}",
+                    f"${hit_df['Price'].min():,.2f}",
+                    f"${hit_df['Price'].max():,.2f}",
+                    f"{hit_df['AHR999'].mean():.2f}",
+                    f"{hit_df['AHR999'].min():.2f}"
+                ]
+            }
+            st.table(pd.DataFrame(stats_data))
             
-            # 增加下載按鈕
-            csv = df_filtered.to_csv().encode('utf-8')
-            st.download_button(
-                label="📥 下載符合條件的 CSV 數據",
-                data=csv,
-                file_name=f"ahr999_under_{target_ahr}_{start_date}.csv",
-                mime='text/csv',
-            )
+            with st.expander("📂 查看这些“黄金时刻”的日期明细"):
+                st.dataframe(hit_df[['Price', 'AHR999', 'ROI_Pct']].style.format({"Price": "${:,.2f}", "AHR999": "{:.2f}", "ROI_Pct": "{:+.2f}%"}))
         else:
-            st.warning(f"在您選擇的區間 {start_date} 至 {end_date} 內，沒有指數低於 {target_ahr:.2f} 的記錄。")
+            st.warning(f"在该时间段内，AHR999 从未低于 {target_ahr:.2f}。请尝试调高阈值或扩大日期范围。")
 
 except Exception as e:
-    st.error(f"❌ 分析出錯：{e}")
+    st.error(f"分析出错: {e}")
