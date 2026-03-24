@@ -8,37 +8,22 @@ import requests
 # 1. 网页基础配置
 st.set_page_config(page_title="CRYPTO定投專業分析", layout="wide")
 
-# --- UI 样式优化补丁：解决显示不全、日历遮挡及层级问题 ---
+# --- UI 样式优化补丁 ---
 st.markdown("""
     <style>
-    /* 1. 确保指标卡片数字清晰且自动缩放 */
-    [data-testid="stMetricValue"] { 
-        font-size: max(14px, 1.6vw) !important; 
-        white-space: nowrap; 
-        color: #FF8C00; 
-    }
-    [data-testid="stMetricLabel"] { font-size: 0.9vw !important; }
-    
-    /* 2. 强制让日历组件浮动在最上层，防止被侧边栏或标题挡住 */
-    div[data-baseweb="datepicker"], div[data-baseweb="popover"] {
-        z-index: 999999 !important;
-    }
-    
-    /* 3. 增加侧边栏底部间距，确保底部的日历有空间向下弹出 */
-    section[data-testid="stSidebar"] > div {
-        padding-bottom: 300px !important;
-    }
-    
+    [data-testid="stMetricValue"] { font-size: max(14px, 1.6vw) !important; white-space: nowrap; color: #FF8C00; }
+    div[data-baseweb="datepicker"], div[data-baseweb="popover"] { z-index: 999999 !important; }
+    section[data-testid="stSidebar"] > div { padding-bottom: 300px !important; }
     .stSuccess { background-color: rgba(255, 140, 0, 0.1) !important; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🧡 CRYPTO定投全景分析 ")
+st.title("🧡 CRYPTO定投全景分析 (穩定強化版)")
 
 # 2. 从后台获取 API Key
 cmc_api_key = st.secrets.get("CMC_API_KEY")
 
-# 3. 侧边栏：区间与策略配置
+# 3. 侧边栏
 with st.sidebar:
     st.header("📅 时间区间设置")
     start_date = st.date_input("定投开始日期", value=datetime(2024, 3, 15))
@@ -61,39 +46,45 @@ with st.sidebar:
     elif frequency == "每月":
         target_day = st.slider("选择月定投日期", 1, 28, 1)
 
-# --- 函数：CMC 实时报价 ---
-def get_cmc_price(symbol, api_key):
+# --- 增强型数据抓取 (带超时控制) ---
+@st.cache_data(ttl=600)
+def get_crypto_data_safe(coin_sym, start, end):
+    symbol = f"{coin_sym}-USD"
+    try:
+        # 增加超时限制，防止卡死
+        df_raw = yf.download(symbol, start=start, end=end + timedelta(days=1), progress=False, timeout=10)
+        if df_raw.empty: return None
+        
+        if isinstance(df_raw.columns, pd.MultiIndex):
+            temp = df_raw.xs('Close', axis=1, level=0)[symbol]
+        else:
+            temp = df_raw['Close']
+        
+        res = temp.to_frame(name='Price')
+        res.index = res.index + timedelta(hours=8)
+        return res.dropna()
+    except Exception as e:
+        st.warning(f"⚠️ 雅虎财经数据抓取暂不可用: {e}")
+        return None
+
+def get_cmc_price_safe(symbol, api_key):
     if not api_key: return None
     url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
     headers = {'Accepts': 'application/json', 'X-CMC_PRO_API_KEY': api_key}
     try:
-        r = requests.get(url, headers=headers, params={'symbol': symbol, 'convert': 'USD'})
+        r = requests.get(url, headers=headers, params={'symbol': symbol, 'convert': 'USD'}, timeout=5)
         return r.json()['data'][symbol]['quote']['USD']['price']
-    except: return None
+    except Exception as e:
+        st.warning(f"⚠️ CMC 实时价格同步超时: {e}")
+        return None
 
-# --- 函数：清洗数据 ---
-@st.cache_data(ttl=300)
-def get_crypto_data(coin_sym, start, end):
-    symbol = f"{coin_sym}-USD"
-    df_raw = yf.download(symbol, start=start, end=end + timedelta(days=1), progress=False)
-    if df_raw.empty: return None
-    
-    if isinstance(df_raw.columns, pd.MultiIndex):
-        temp = df_raw.xs('Close', axis=1, level=0)[symbol]
-    else:
-        temp = df_raw['Close']
-    
-    res = temp.to_frame(name='Price')
-    res.index = res.index + timedelta(hours=8)
-    return res.dropna()
-
-# --- 核心逻辑执行 ---
+# --- 执行主逻辑 ---
 try:
-    with st.spinner(f'正在同步 {coin} 数据...'):
-        df = get_crypto_data(coin, start_date, end_date)
+    with st.spinner(f'🚀 正在同步全球数据市场...'):
+        df = get_crypto_data_safe(coin, start_date, end_date)
         
         if df is not None:
-            # A. 标记定投日
+            # 标记定投日 & 财务计算 (逻辑保持不变)
             if frequency == "每天":
                 df['Is_DCA'] = True
             elif frequency == "每周":
@@ -101,91 +92,20 @@ try:
             else:
                 df['Is_DCA'] = df.index.day == target_day
 
-            # B. 财务计算
             df['Cost_Step'] = df['Is_DCA'].apply(lambda x: amount if x else 0)
             df['Qty_Step'] = df.apply(lambda row: row['Cost_Step'] / row['Price'] if row['Is_DCA'] else 0, axis=1)
-            
             df['Cum_Cost'] = df['Cost_Step'].cumsum()
             df['Cum_Qty'] = df['Qty_Step'].cumsum()
             df['Avg_Price'] = (df['Cum_Cost'] / df['Cum_Qty']).fillna(0)
             df['Market_Value'] = df['Cum_Qty'] * df['Price']
             df['ROI_Pct'] = (((df['Price'] - df['Avg_Price']) / df['Avg_Price']) * 100).fillna(0).round(2)
 
-            # C. 实时数据对齐
+            # 实时价联动
             is_to_now = end_date >= datetime.now().date()
-            live_p = get_cmc_price(coin, cmc_api_key) if is_to_now else None
+            live_p = get_cmc_price_safe(coin, cmc_api_key) if is_to_now else None
             
             final_p = live_p if (live_p and is_to_now) else df['Price'].iloc[-1]
             final_cost = df['Cum_Cost'].iloc[-1]
             final_qty = df['Cum_Qty'].iloc[-1]
             final_avg = final_cost / final_qty if final_qty > 0 else 0
             final_val = final_qty * final_p
-            final_roi = ((final_val - final_cost) / final_cost * 100) if final_cost > 0 else 0
-
-            # D. 渲染顶部指标
-            st.info(f"📊 区间统计：{start_date} 至 {end_date} | 共计定投 {len(df[df['Is_DCA']])} 期")
-            
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("区间总投入", f"${final_cost:,.0f}")
-            m2.metric(f"累计持仓 {coin}", f"{final_qty:.4f}")
-            m3.metric("持仓均价", f"${final_avg:,.2f}")
-            m4.metric("实时价 vs 均价", f"{(final_p-final_avg)/final_avg*100:+.2f}%", delta_color="inverse")
-            m5.metric("截止市值", f"${final_val:,.0f}", f"{final_roi:+.2f}%")
-
-            if live_p and is_to_now:
-                st.success(f"✅ CMC 實時數據已掛載：{coin} 現價 ${live_p:,.2f}")
-
-            # E. 增强版 Plotly 图表 (带本金、市值、币价、盈亏比)
-            fig = go.Figure()
-
-            # 1. 账户市值 (主曲线：橙色填充)
-            fig.add_trace(go.Scatter(
-                x=df.index, 
-                y=df['Market_Value'], 
-                name="账户市值", 
-                fill='tonexty', 
-                line=dict(color='#FF8C00', width=2.5),
-                fillcolor='rgba(255, 140, 0, 0.15)',
-                hovertemplate=(
-                    "<b>📅 日期: %{x}</b><br>" +
-                    f"🪙 当时 {coin} 价格: " + "$%{customdata[0]:,.2f}<br>" +
-                    "💰 累计投入本金: $%{customdata[1]:,.0f}<br>" +
-                    "📈 账户当前市值: $%{y:,.0f}<br>" +
-                    "<b>📊 实时盈亏比例: %{customdata[2]:+.2f}%</b>" +
-                    "<extra></extra>"
-                ),
-                customdata=df[['Price', 'Cum_Cost', 'ROI_Pct']].values
-            ))
-
-            # 2. 投入本金线 (灰色虚线)
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df['Cum_Cost'], name="累计本金线", 
-                line=dict(color='#666666', dash='dash', width=2),
-                hoverinfo='skip'
-            ))
-            
-            # 3. BTC 减半标注
-            if coin == "BTC":
-                for h in ['2020-04-11', '2024-04-20']:
-                    h_dt = pd.to_datetime(h) + timedelta(hours=8)
-                    if h_dt >= df.index.min() and h_dt <= df.index.max():
-                        fig.add_vline(x=h_dt.timestamp() * 1000, line_dash="dot", line_color="red", 
-                                     annotation_text="BTC 减半", annotation_position="top left")
-
-            # 4. 图表布局
-            fig.update_layout(
-                title=f"<b>{coin} 资产增长细节分析 (区间回测)</b>",
-                xaxis_title="日期 (北京时间 08:00 对齐)",
-                yaxis_title="价值 (USD)",
-                hovermode="x unified",
-                template="plotly_white",
-                height=600,
-                legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            with st.expander("📂 查看详细定投账单"):
-                st.dataframe(df[['Price', 'Avg_Price', 'Cum_Qty', 'ROI_Pct', 'Market_Value']].style.format("{:.2f}"))
-
-except Exception as e:
-    st.error(f"❌ 运行异常：{e}")
