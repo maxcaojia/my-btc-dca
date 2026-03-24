@@ -8,163 +8,156 @@ import requests
 import time
 
 # 1. 网页基础配置
-st.set_page_config(page_title="AHR999 自定義探測終端", layout="wide")
+st.set_page_config(page_title="AHR999 定投全景終極版", layout="wide")
 
-# --- UI 样式优化补丁：解决日历遮挡、层级与显示不全问题 ---
+# --- UI 样式优化补丁：解决显示、层级与日历遮挡 ---
 st.markdown("""
     <style>
-    /* 指标数字显示 */
     [data-testid="stMetricValue"] { font-size: max(14px, 1.6vw) !important; white-space: nowrap; color: #FF8C00; }
-    /* 日历层级最高 */
     div[data-baseweb="datepicker"], div[data-baseweb="popover"] { z-index: 999999 !important; }
-    /* 侧边栏底部留白，确保日历向下弹出 */
     section[data-testid="stSidebar"] > div { padding-bottom: 300px !important; }
+    .stSuccess { background-color: rgba(255, 140, 0, 0.1) !important; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🧡 AHR999 自定義參數回測終端")
+st.title("🧡 AHR999 定投全景分析 (終極穩定對齊版)")
 
-# 2. 侧边栏：核心控制
+# 2. 获取 API Key
+cmc_api_key = st.secrets.get("CMC_API_KEY")
+
+# 3. 侧边栏
 with st.sidebar:
     st.header("📅 1. 区间设置")
-    start_date = st.date_input("开始日期", value=datetime(2020, 1, 1))
-    end_date = st.date_input("截止日期", value=datetime.now().date())
+    start_date = st.date_input("定投开始日期", value=datetime(2020, 1, 1))
+    end_date = st.date_input("定投截止日期", value=datetime.now().date())
     
-    st.header("🎯 2. AHR999 探測參數")
-    target_ahr = st.slider("自定义 AHR999 探测线", 0.1, 5.0, 0.45, step=0.01)
-    st.caption(f"当前统计区间内所有 AHR999 < {target_ahr:.2f} 的日期")
+    st.header("🎯 2. AHR999 探测参数")
+    target_ahr = st.slider("自定义探测线 (统计低于此值的日子)", 0.1, 3.0, 0.45, step=0.01)
 
-    st.header("⚙️ 3. 资产配置")
-    coin = st.selectbox("选择资产 (建议BTC)", ["BTC", "ETH", "SOL", "BNB"], index=0)
+    st.header("⚙️ 3. 资产与策略")
+    coin = st.selectbox("选择切换币种", ["BTC", "ETH", "SOL", "BNB"], index=0)
     amount = st.number_input("每期定投金额 ($)", min_value=1, value=100)
     frequency = st.selectbox("定投频率", ["每天", "每周", "每月"], index=0)
-
-    if st.button("🔄 刷新全部数据"):
+    
+    if st.button("🔄 强制刷新数据 (清理缓存)"):
         st.cache_data.clear()
         st.rerun()
 
-# --- AHR999 核心对齐算法：使用几何平均 (CoinGlass 逻辑) ---
-def calculate_ahr_aligned(df):
+# --- 核心算法：几何平均 AHR999 (對齊 CoinGlass 08:00 邏輯) ---
+def calculate_ahr999_core(df):
     # 200日几何平均
     df['Log_Price'] = np.log(df['Price'])
     df['Geo_MA200'] = np.exp(df['Log_Price'].rolling(window=200).mean())
-    # 币龄拟合线 (九神原版)
+    # 币龄拟合线
     genesis = pd.to_datetime('2009-01-03')
-    df['Days'] = (df.index - genesis).days
-    df['Fit'] = 10**(5.84 * np.log10(df['Days']) - 17.01)
-    # AHR999 计算
-    df['AHR999'] = ((df['Price'] / df['Fit']) * (df['Price'] / df['Geo_MA200'])).round(2)
+    df['Days_Passed'] = (df.index - genesis).days
+    df['Fit_Price'] = 10**(5.84 * np.log10(df['Days_Passed']) - 17.01)
+    # 计算指数
+    df['AHR999'] = ((df['Price'] / df['Fit_Price']) * (df['Price'] / df['Geo_MA200'])).round(2)
     return df
 
 @st.cache_data(ttl=600)
-def fetch_and_calc(coin_sym, start, end):
+def fetch_data_stable(coin_sym, start, end, retries=3):
     symbol = f"{coin_sym}-USD"
-    # 往前多抓 400 天确保几何平均计算准确
+    # 向前追溯确保几何平均准确
     f_start = start - timedelta(days=400)
+    for i in range(retries):
+        try:
+            data = yf.download(symbol, start=f_start, end=end + timedelta(days=1), progress=False, timeout=15)
+            if not data.empty:
+                df = data.xs('Close', axis=1, level=0)[symbol].to_frame(name='Price') if isinstance(data.columns, pd.MultiIndex) else data[['Close']].rename(columns={'Close': 'Price'})
+                df.index = df.index + timedelta(hours=8) # 北京时间对齐
+                df = calculate_ahr999_core(df)
+                return df[df.index >= pd.to_datetime(start)]
+        except Exception:
+            if i < retries - 1:
+                time.sleep(1)
+                continue
+    return None
+
+def fetch_cmc_price(symbol, api_key):
+    if not api_key: return None
     try:
-        data = yf.download(symbol, start=f_start, end=end + timedelta(days=1), progress=False, timeout=20)
-        if data.empty: return None
-        # 数据提取
-        df = data.xs('Close', axis=1, level=0)[symbol].to_frame(name='Price') if isinstance(data.columns, pd.MultiIndex) else data[['Close']].rename(columns={'Close': 'Price'})
-        # 对齐北京时间 08:00
-        df.index = df.index + timedelta(hours=8)
-        df = calculate_ahr_aligned(df)
-        # 动态切回用户选定的区间
-        return df[df.index >= pd.to_datetime(start)]
+        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+        r = requests.get(url, headers={'X-CMC_PRO_API_KEY': api_key}, params={'symbol': symbol, 'convert': 'USD'}, timeout=8)
+        return r.json()['data'][symbol]['quote']['USD']['price']
     except: return None
 
 # --- 执行主逻辑 ---
 try:
-    df = fetch_and_calc(coin, start_date, end_date)
+    with st.spinner('🚀 正在同步全球市場數據...'):
+        df_all = fetch_data_stable(coin, start_date, end_date)
     
-    if df is not None:
-        # 1. 基础定投财务计算
-        if frequency == "每天": df['Is_DCA'] = True
-        elif frequency == "每周": df['Is_DCA'] = df.index.weekday == 0
-        else: df['Is_DCA'] = df.index.day == 1
+    if df_all is not None:
+        # 1. 财务回测计算
+        if frequency == "每天": df_all['Is_DCA'] = True
+        elif frequency == "每周": df_all['Is_DCA'] = df_all.index.weekday == 0
+        else: df_all['Is_DCA'] = df_all.index.day == 1
 
-        df['Cost_In'] = df['Is_DCA'].apply(lambda x: amount if x else 0)
-        df['Qty_In'] = df.apply(lambda r: r['Cost_In'] / r['Price'] if r['Is_DCA'] else 0, axis=1)
-        df['Cum_Cost'] = df['Cost_In'].cumsum()
-        df['Cum_Qty'] = df['Qty_In'].cumsum()
-        df['Portfolio_Value'] = df['Cum_Qty'] * df['Price']
-        df['ROI_Pct'] = (((df['Portfolio_Value'] - df['Cum_Cost']) / df['Cum_Cost']) * 100).fillna(0).round(2)
+        df_all['Cost_In'] = df_all['Is_DCA'].apply(lambda x: amount if x else 0)
+        df_all['Qty_In'] = df_all.apply(lambda r: r['Cost_In'] / r['Price'] if r['Is_DCA'] else 0, axis=1)
+        df_all['Cum_Cost'] = df_all['Cost_In'].cumsum()
+        df_all['Cum_Qty'] = df_all['Qty_In'].cumsum()
+        df_all['Market_Value'] = df_all['Cum_Qty'] * df_all['Price']
+        df_all['ROI_Pct'] = (((df_all['Market_Value'] - df_all['Cum_Cost']) / df_all['Cum_Cost']) * 100).fillna(0).round(2)
 
-        # 2. 动态探测过滤
-        hit_df = df[df['AHR999'] < target_ahr].copy()
+        # 2. 探测器过滤：筛选所有低于阈值的时刻
+        df_hits = df_all[df_all['AHR999'] < target_ahr].copy()
+
+        # 3. 指标看板
+        live_p = fetch_cmc_price(coin, cmc_api_key) if end_date >= datetime.now().date() else None
+        latest = df_all.iloc[-1]
         
-        # 3. 顶部指标显示
-        latest = df.iloc[-1]
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("最新 AHR999", f"{latest['AHR999']:.2f}")
-        m2.metric(f"探测线 < {target_ahr:.2f} 天数", f"{len(hit_df)}天")
-        m3.metric("区间平均价格", f"${hit_df['Price'].mean():,.2f}" if not hit_df.empty else "N/A")
-        m4.metric("总投入本金", f"${df['Cum_Cost'].iloc[-1]:,.0f}")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("當前 AHR999", f"{latest['AHR999']:.2f}")
+        m2.metric(f"低於 {target_ahr} 天數", f"{len(df_hits)}天")
+        m3.metric("區间平均買入價", f"${df_hits['Price'].mean():,.2f}" if not df_hits.empty else "N/A")
+        m4.metric("累計投入本金", f"${latest['Cum_Cost']:,.0f}")
+        m5.metric("全段總盈虧", f"{latest['ROI_Pct']:+.2f}%")
 
-        # 4. 增强版绘图 (蓝色实线 + 层级穿透)
+        # 4. 图表渲染 (蓝色实线 + 悬停显示)
         fig = go.Figure()
-        
-        # A. 账户市值 (底层面积图)
+        # 账户市值 (底层)
         fig.add_trace(go.Scatter(
-            x=df.index, y=df['Portfolio_Value'], name="账户市值", fill='tonexty', 
-            line=dict(color='#FF8C00', width=2),
-            fillcolor='rgba(255, 140, 0, 0.15)',
+            x=df_all.index, y=df_all['Market_Value'], name="市值", fill='tonexty', 
+            line=dict(color='#FF8C00', width=2), fillcolor='rgba(255, 140, 0, 0.15)',
             hovertemplate="日期: %{x}<br>AHR999: %{customdata:.2f}<br>市值: $%{y:,.0f}<extra></extra>",
-            customdata=df['AHR999']
+            customdata=df_all['AHR999']
         ))
-        
-        # B. AHR999 指数 (核心视觉：蓝色实线)
+        # AHR999 (蓝色实线，层级置顶)
         fig.add_trace(go.Scatter(
-            x=df.index, y=df['AHR999'], name="AHR999指数", 
+            x=df_all.index, y=df_all['AHR999'], name="AHR999指數", 
             line=dict(color='blue', width=2.5, dash='solid'), 
             yaxis="y2"
         ))
+        # 本金线
+        fig.add_trace(go.Scatter(x=df_all.index, y=df_all['Cum_Cost'], name="投入本金", line=dict(color='gray', dash='dash')))
         
-        # C. 投入本金线 (灰色虚线，置于上层)
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df['Cum_Cost'], name="投入本金", 
-            line=dict(color='#666666', dash='dash', width=2)
-        ))
-
-        # D. 动态探测探测线
-        fig.add_hline(y=target_ahr, line_dash="dash", line_color="red", 
-                      annotation_text=f"你的探测线({target_ahr})", yref="y2")
+        # 探测阈值线
+        fig.add_hline(y=target_ahr, line_dash="dash", line_color="red", annotation_text=f"探測線:{target_ahr}", yref="y2")
 
         fig.update_layout(
             template="plotly_white", hovermode="x unified", height=600,
-            yaxis=dict(title="账户价值 (USD)"),
-            yaxis2=dict(title="AHR999 指数", overlaying="y", side="right", range=[0, 3]),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            yaxis=dict(title="價值 (USD)"),
+            yaxis2=dict(title="AHR999", overlaying="y", side="right", range=[0, 3]),
+            legend=dict(orientation="h", y=1.05)
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # 5. 分段明细显示
-        st.subheader(f"📋 AHR999 < {target_ahr:.2f} 时的详细统计")
-        if not hit_df.empty:
-            stats_data = {
-                "指标项目": ["出现天数", "区间平均价格", "区间最低价格", "区间最高价格", "区间平均指数", "指数最低点"],
-                "数值详情": [
-                    f"{len(hit_df)} 天",
-                    f"${hit_df['Price'].mean():,.2f}",
-                    f"${hit_df['Price'].min():,.2f}",
-                    f"${hit_df['Price'].max():,.2f}",
-                    f"{hit_df['AHR999'].mean():.2f}",
-                    f"{hit_df['AHR999'].min():.2f}"
-                ]
-            }
-            st.table(pd.DataFrame(stats_data))
+        # 5. 全量明细数据表 (无行数限制)
+        st.subheader(f"📋 AHR999 < {target_ahr:.2f} 歷史明細 (全區間追蹤)")
+        if not df_hits.empty:
+            st.write(f"在當前時間段內，共篩選出 {len(df_hits)} 條符合條件的記錄：")
+            st.dataframe(df_hits[['Price', 'AHR999', 'Geo_MA200', 'Fit_Price', 'ROI_Pct']].style.format({
+                "Price": "${:,.2f}", "AHR999": "{:.2f}", "Geo_MA200": "${:,.2f}", 
+                "Fit_Price": "${:,.2f}", "ROI_Pct": "{:+.2f}%"
+            }), height=500)
             
-            with st.expander(f"📂 查看符合条件的 {len(hit_df)} 条历史明细 (无行数限制)"):
-                # 这里去掉了 .tail() 限制，直接显示全量数据
-                st.dataframe(hit_df[['Price', 'AHR999', 'ROI_Pct']].style.format({
-                    "Price": "${:,.2f}", "AHR999": "{:.2f}", "ROI_Pct": "{:+.2f}%"
-                }), height=400)
-                
-                # 增加 CSV 下载
-                csv = hit_df.to_csv().encode('utf-8')
-                st.download_button("📥 下载这些历史底部数据", data=csv, file_name=f"ahr999_backtest.csv", mime='text/csv')
+            # 增加导出功能
+            csv = df_hits.to_csv().encode('utf-8')
+            st.download_button("📥 導出符合條件的歷史數據 (CSV)", data=csv, file_name=f"ahr999_hit_data.csv", mime='text/csv')
         else:
-            st.warning(f"在该时间段内，AHR999 未曾低于 {target_ahr:.2f}")
+            st.warning(f"在所選區間內，AHR999 未曾低於 {target_ahr:.2f}。")
 
 except Exception as e:
-    st.error(f"程序运行异常: {e}")
+    st.error(f"❌ 程序運行異常: {e}")
